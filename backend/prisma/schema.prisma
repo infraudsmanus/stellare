@@ -1,0 +1,47 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model UploadJob {
+  id              String            @id @default(cuid())
+  originalZipName String
+  status          String            @default("PENDING") // PENDING, PROCESSING, COMPLETED, FAILED
+  uploadedAt      DateTime          @default(now())
+  completedAt     DateTime?         
+  processedFiles  ProcessedFile[]
+  processingLogs  ProcessingLog[]
+  htmlContent     String?           @db.Text
+  mappingJson     Json?             
+}
+
+model ProcessedFile {
+  id                String    @id @default(cuid())
+  uploadJobId       String
+  uploadJob         UploadJob @relation(fields: [uploadJobId], references: [id])
+  originalPath      String
+  s3Path            String    @unique
+  md5Hash           String
+  createdAt         DateTime  @default(now())
+
+  @@index([uploadJobId])
+}
+
+model ProcessingLog {
+  id          String    @id @default(cuid())
+  uploadJobId String
+  uploadJob   UploadJob @relation(fields: [uploadJobId], references: [id])
+  timestamp   DateTime  @default(now())
+  message     String
+  level       String    @default("INFO") // INFO, ERROR, WARNING
+
+  @@index([uploadJobId])
+}
+
