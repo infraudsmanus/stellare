@@ -1,4 +1,4 @@
-import { Router } from 'express';
+import { RequestHandler, Router } from 'express';
 import multer from 'multer';
 import { handleFileUpload } from '../controllers/uploadController';
 
@@ -19,7 +19,7 @@ const upload = multer({
   }
 });
 
-router.post('/', upload.single('zipfile'), handleFileUpload);
+router.post('/', upload.single('zipfile'), handleFileUpload as RequestHandler);
 
 export default router;
 

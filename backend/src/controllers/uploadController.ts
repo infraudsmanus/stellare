@@ -1,10 +1,10 @@
-import { Request, Response } from 'express';
+import { Request, Response, NextFunction } from 'express';
 import { PrismaClient } from '@prisma/client';
 import { processZipFile } from '../services/uploadService';
 
 const prisma = new PrismaClient();
 
-export const handleFileUpload = async (req: Request, res: Response) => {
+export const handleFileUpload = async (req: Request, res: Response, next: NextFunction) => {
   if (!req.file) {
     return res.status(400).json({ message: 'Nenhum arquivo ZIP enviado.' });
   }
@@ -47,7 +47,7 @@ export const handleFileUpload = async (req: Request, res: Response) => {
         status: 'COMPLETED',
         completedAt: new Date(),
         htmlContent: processingResult.htmlContent,
-        mappingJson: processingResult.mappingJson,
+        mappingJson: processingResult.mappingJson as object,
       },
     });
 

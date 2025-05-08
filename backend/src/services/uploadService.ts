@@ -57,7 +57,6 @@ export const processZipFile = async (zipBuffer: Buffer, jobId: string): Promise<
     const fileMapForJson: { [originalPath: string]: { caminho_original: string; caminho_bucket: string; hash_md5: string } } = {};
     const internalFileMap: { [originalPath: string]: { s3Path: string; md5Hash: string } } = {};
     let processedFileCount = 0;
-    const version = process.env.APP_VERSION || "1.0.0"; // Get version from env or default
 
     for (const entry of zipEntries) {
         if (entry.isDirectory) continue;
@@ -86,7 +85,7 @@ export const processZipFile = async (zipBuffer: Buffer, jobId: string): Promise<
             const assetBuffer = assetEntry.getData();
             const md5Hash = crypto.createHash('md5').update(assetBuffer).digest('hex');
             const fileExtension = path.extname(assetEntry.entryName);
-            const s3Key = `${md5Hash}${fileExtension}`;
+            const s3Key = `${jobId}/${md5Hash}${fileExtension}`;
             const originalAssetPathNormalized = assetEntry.entryName.replace(/^\.\//, '');
             
             let contentType = 'application/octet-stream';
@@ -134,22 +133,11 @@ export const processZipFile = async (zipBuffer: Buffer, jobId: string): Promise<
         htmlContent = htmlContent.replace(urlPattern, `url($1${newPath}$2)`);
     }
 
-    // Add footer with version and build time
-    const buildTimestamp = new Date().toISOString();
-    const footerHtml = `\n<footer><p>Version: ${version} | Build: ${buildTimestamp}</p></footer>`;
-    
-    if (htmlContent.includes('</body>')) {
-        htmlContent = htmlContent.replace('</body>', `${footerHtml}\n</body>`);
-    } else {
-        htmlContent += footerHtml; // Fallback if no body tag
-        await logProcessing(jobId, 'No </body> tag found. Appended footer to the end of HTML.', 'WARNING');
-    }
+    await logProcessing(jobId, 'HTML content updated with S3 paths');
 
-    await logProcessing(jobId, 'HTML content updated with S3 paths and footer.');
-
-    // Upload the modified HTML to S3 as index.html
+    // Upload the HTML to S3 as index.html
     const finalHtmlBuffer = Buffer.from(htmlContent, 'utf8');
-    const htmlS3Key = 'index.html'; // Or a job-specific path like `${jobId}/index.html`
+    const htmlS3Key = `${jobId}/index.html`; // Or a job-specific path like `${jobId}/index.html`
     const finalHtmlS3Url = await uploadToS3(finalHtmlBuffer, htmlS3Key, 'text/html');
     await logProcessing(jobId, `Uploaded modified HTML to ${finalHtmlS3Url}`);
 

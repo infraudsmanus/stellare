@@ -45,43 +45,43 @@ function FileUpload() {
 
     try {
       // Placeholder for actual API call
-      // const response = await fetch('/api/upload', { // Replace with actual backend endpoint
-      //   method: 'POST',
-      //   body: formData,
-      //   onUploadProgress: (progressEvent) => {
-      //     const percentCompleted = Math.round((progressEvent.loaded * 100) / progressEvent.total);
-      //     setUploadProgress(percentCompleted);
-      //   }
-      // });
-
-      // Simulate API call for now
-      await new Promise(resolve => setTimeout(resolve, 2000)); 
-      // Simulate progress
-      let currentProgress = 0;
-      const interval = setInterval(() => {
-        currentProgress += 10;
-        if (currentProgress <= 100) {
-          setUploadProgress(currentProgress);
-        } else {
-          clearInterval(interval);
-          // Simulate success or error
-          const success = Math.random() > 0.3; // Simulate success/failure
-          if (success) {
-            setUploadStatus('success');
-            setSelectedFile(null); // Clear selection on success
-          } else {
-            setUploadStatus('error');
-            setErrorDetails('Falha no upload. Tente novamente.');
-          }
+      const response = await fetch('http://localhost:3001/api/uploads', { // Replace with actual backend endpoint
+        method: 'POST',
+        body: formData,
+        onUploadProgress: (progressEvent) => {
+          const percentCompleted = Math.round((progressEvent.loaded * 100) / progressEvent.total);
+          setUploadProgress(percentCompleted);
         }
-      }, 200);
+      });
 
-      // if (!response.ok) {
-      //   const errorData = await response.json();
-      //   throw new Error(errorData.message || 'Falha no upload');
-      // }
-      // setUploadStatus('success');
-      // setSelectedFile(null); // Clear selection on success
+      // // Simulate API call for now
+      // await new Promise(resolve => setTimeout(resolve, 2000)); 
+      // // Simulate progress
+      // let currentProgress = 0;
+      // const interval = setInterval(() => {
+      //   currentProgress += 10;
+      //   if (currentProgress <= 100) {
+      //     setUploadProgress(currentProgress);
+      //   } else {
+      //     clearInterval(interval);
+      //     // Simulate success or error
+      //     const success = Math.random() > 0.3; // Simulate success/failure
+      //     if (success) {
+      //       setUploadStatus('success');
+      //       setSelectedFile(null); // Clear selection on success
+      //     } else {
+      //       setUploadStatus('error');
+      //       setErrorDetails('Falha no upload. Tente novamente.');
+      //     }
+      //   }
+      // }, 200);
+
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.message || 'Falha no upload');
+      }
+      setUploadStatus('success');
+      setSelectedFile(null); // Clear selection on success
 
     } catch (error) {
       setUploadStatus('error');
