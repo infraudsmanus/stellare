@@ -10,7 +10,7 @@ const prisma = new PrismaClient();
 const S3_BUCKET_NAME = process.env.BUCKET_URI ? process.env.BUCKET_URI.split('.')[0] : 'stellare-develop-content';
 const s3 = new AWS.S3({
     region: process.env.AWS_REGION || 'us-east-1',
-    accessKeyId: process.env.AWS_ACCESS_KEY_ID, // Ensure these are in .env or environment
+    accessKeyId: process.env.AWS_ACCESS_KEY_ID,
     secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY
 });
 
@@ -18,6 +18,7 @@ interface ProcessingResult {
     htmlContent: string | null;
     mappingJson: Prisma.JsonValue | null;
     processedFileCount: number;
+    finalHtmlS3Url: string | null;
 }
 
 async function logProcessing(jobId: string, message: string, level: 'INFO' | 'ERROR' | 'WARNING' = 'INFO') {
@@ -41,35 +42,43 @@ async function uploadToS3(buffer: Buffer, s3Key: string, contentType: string): P
         Key: s3Key,
         Body: buffer,
         ContentType: contentType,
-        // ACL: 'public-read' // Consider bucket policy for public access. For now, handled by bucket policy.
     };
     const data = await s3.upload(params).promise();
-    return data.Location; 
+    return data.Location;
 }
 
 export const processZipFile = async (zipBuffer: Buffer, jobId: string): Promise<ProcessingResult> => {
     await logProcessing(jobId, 'Starting ZIP file processing.');
     const zip = new AdmZip(zipBuffer);
     const zipEntries = zip.getEntries();
-    
+
     let htmlFileEntry: AdmZip.IZipEntry | undefined;
-    const staticAssetEntries: AdmZip.IZipEntry[] = [];
+    let htmlFileOriginalFullDir = '';
+    const staticAssetEntries: { entry: AdmZip.IZipEntry; relativePath: string }[] = [];
     const fileMapForJson: { [originalPath: string]: { caminho_original: string; caminho_bucket: string; hash_md5: string } } = {};
-    const internalFileMap: { [originalPath: string]: { s3Path: string; md5Hash: string } } = {};
+    const internalFileMap: { [originalZipPath: string]: { s3Path: string; md5Hash: string } } = {};
     let processedFileCount = 0;
+    const version = process.env.APP_VERSION || "1.0.0";
 
+    // First pass: Identify HTML file and its directory, and filter out __MACOSX
     for (const entry of zipEntries) {
-        if (entry.isDirectory) continue;
-        const entryNameNormalized = entry.entryName.replace(/^\.\//, ''); // Normalize path by removing leading ./ if present
+        if (entry.isDirectory || entry.entryName.startsWith('__MACOSX/')) {
+            continue;
+        }
+        // Normalize entry name (remove leading ./) and decode if URI encoded
+        let normalizedEntryName = decodeURIComponent(entry.entryName.replace(/^\.\//, ''));
 
-        if (entryNameNormalized.toLowerCase().endsWith('.html')) {
+        if (normalizedEntryName.toLowerCase().endsWith('.html')) {
             if (!htmlFileEntry) {
                 htmlFileEntry = entry;
+                // Determine the directory of the HTML file within the ZIP
+                const pathParts = normalizedEntryName.split('/');
+                pathParts.pop(); // Remove filename to get directory
+                htmlFileOriginalFullDir = pathParts.join('/');
+                if (htmlFileOriginalFullDir) htmlFileOriginalFullDir += '/'; // Add trailing slash if not root
             } else {
-                await logProcessing(jobId, `Multiple HTML files found. Using '${htmlFileEntry.entryName}'. Ignoring '${entryNameNormalized}'.`, 'WARNING');
+                await logProcessing(jobId, `Multiple HTML files found. Using '${htmlFileEntry.entryName}'. Ignoring '${normalizedEntryName}'.`, 'WARNING');
             }
-        } else if (entryNameNormalized.startsWith('css/') || entryNameNormalized.startsWith('js/') || entryNameNormalized.startsWith('images/')) {
-            staticAssetEntries.push(entry);
         }
     }
 
@@ -77,73 +86,109 @@ export const processZipFile = async (zipBuffer: Buffer, jobId: string): Promise<
         await logProcessing(jobId, 'No HTML file found in the ZIP.', 'ERROR');
         throw new Error('No HTML file found in the ZIP.');
     }
+    await logProcessing(jobId, `Identified HTML file: ${htmlFileEntry.entryName} (Original base directory: '${htmlFileOriginalFullDir}')`);
 
-    await logProcessing(jobId, `Found HTML file: ${htmlFileEntry.entryName}. Found ${staticAssetEntries.length} static assets.`);
+    // Second pass: Identify static assets relative to the HTML file's directory
+    for (const entry of zipEntries) {
+        if (entry.isDirectory || entry.entryName.startsWith('__MACOSX/') || entry.entryName === htmlFileEntry.entryName) {
+            continue;
+        }
+        let normalizedEntryName = decodeURIComponent(entry.entryName.replace(/^\.\//, ''));
 
-    for (const assetEntry of staticAssetEntries) {
+        // Check if the asset is within the same directory structure as the HTML file or its subdirectories
+        if (normalizedEntryName.startsWith(htmlFileOriginalFullDir)) {
+            // Calculate path relative to the HTML file's directory
+            const relativePath = normalizedEntryName.substring(htmlFileOriginalFullDir.length);
+            staticAssetEntries.push({ entry, relativePath });
+        }
+    }
+    
+    await logProcessing(jobId, `Found ${staticAssetEntries.length} static assets relative to HTML.`);
+
+    // Process static assets
+    for (const { entry, relativePath } of staticAssetEntries) {
         try {
-            const assetBuffer = assetEntry.getData();
+            const assetBuffer = entry.getData();
             const md5Hash = crypto.createHash('md5').update(assetBuffer).digest('hex');
-            const fileExtension = path.extname(assetEntry.entryName);
-            const s3Key = `${jobId}/${md5Hash}${fileExtension}`;
-            const originalAssetPathNormalized = assetEntry.entryName.replace(/^\.\//, '');
-            
+            const s3Key = `${jobId}/${relativePath}`; // Preserve original relative path under jobId folder
+            const originalZipPath = entry.entryName.replace(/^\.\//, ''); // Path as it was in ZIP for mapping
+
             let contentType = 'application/octet-stream';
+            const fileExtension = path.extname(entry.entryName).toLowerCase();
             if (fileExtension === '.css') contentType = 'text/css';
             else if (fileExtension === '.js') contentType = 'application/javascript';
-            else if (['.png', '.jpg', '.jpeg', '.gif', '.svg'].includes(fileExtension.toLowerCase())) contentType = `image/${fileExtension.substring(1)}`;
+            else if (['.png', '.jpg', '.jpeg', '.gif', '.svg', '.webp'].includes(fileExtension)) contentType = `image/${fileExtension.substring(1)}`;
+            // Add more content types as needed
 
             const s3Path = await uploadToS3(assetBuffer, s3Key, contentType);
-            await logProcessing(jobId, `Uploaded ${originalAssetPathNormalized} to ${s3Path}`);
+            await logProcessing(jobId, `Uploaded ${originalZipPath} to ${s3Path} (S3 Key: ${s3Key})`);
 
-            internalFileMap[originalAssetPathNormalized] = { s3Path, md5Hash };
-            fileMapForJson[originalAssetPathNormalized] = {
-                caminho_original: originalAssetPathNormalized,
-                caminho_bucket: s3Path, 
+            // For HTML replacement, we need the path relative to the HTML file
+            internalFileMap[relativePath] = { s3Path, md5Hash }; 
+            fileMapForJson[originalZipPath] = {
+                caminho_original: originalZipPath,
+                caminho_bucket: s3Path,
                 hash_md5: md5Hash
             };
-            
+
             await prisma.processedFile.create({
                 data: {
                     uploadJobId: jobId,
-                    originalPath: originalAssetPathNormalized,
+                    originalPath: originalZipPath,
                     s3Path: s3Path,
                     md5Hash: md5Hash,
                 }
             });
             processedFileCount++;
         } catch (error: any) {
-            await logProcessing(jobId, `Error processing asset ${assetEntry.entryName}: ${error.message}`, 'ERROR');
+            await logProcessing(jobId, `Error processing asset ${entry.entryName}: ${error.message}`, 'ERROR');
         }
     }
 
     let htmlContent = htmlFileEntry.getData().toString('utf8');
 
-    for (const originalPath in internalFileMap) {
-        const newPath = internalFileMap[originalPath].s3Path;
-        const escapedOriginalPath = originalPath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    // Update paths in HTML content
+    for (const originalRelativePath in internalFileMap) {
+        const s3ObjectUrl = internalFileMap[originalRelativePath].s3Path;
+        // The S3 path for assets is already absolute. We need to make sure the HTML references them correctly.
+        // The key for replacement is the path *as it appears in the HTML file*.
+        // This path is `originalRelativePath` because we've structured S3 to mirror this.
+        const escapedOriginalRelativePath = originalRelativePath.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+        const srcPattern = new RegExp(`src\s*=\s*(["'])${escapedOriginalRelativePath}(["'])`, 'g');
+        htmlContent = htmlContent.replace(srcPattern, `src=$1${s3ObjectUrl}$2`);
+
+        const hrefPattern = new RegExp(`href\s*=\s*(["'])${escapedOriginalRelativePath}(["'])`, 'g');
+        htmlContent = htmlContent.replace(hrefPattern, `href=$1${s3ObjectUrl}$2`);
+
+        const urlPattern = new RegExp(`url\(\s*(["']?)${escapedOriginalRelativePath}(["']?)\s*\)`, 'g');
+        htmlContent = htmlContent.replace(urlPattern, `url($1${s3ObjectUrl}$2)`);
         
-        const srcPattern = new RegExp(`src=(['\"'])${escapedOriginalPath}(['\"'])`, 'g');
-        htmlContent = htmlContent.replace(srcPattern, `src=$1${newPath}$2`);
-
-        const hrefPattern = new RegExp(`href=(['\"'])${escapedOriginalPath}(['\"'])`, 'g');
-        htmlContent = htmlContent.replace(hrefPattern, `href=$1${newPath}$2`);
-
-        const urlPattern = new RegExp(`url\((['\"']?)${escapedOriginalPath}(['\"']?)\)`, 'g');
-        htmlContent = htmlContent.replace(urlPattern, `url($1${newPath}$2)`);
+        await logProcessing(jobId, `HTML Path Update: Replaced '${originalRelativePath}' with '${s3ObjectUrl}'`);
     }
 
-    await logProcessing(jobId, 'HTML content updated with S3 paths');
+    // Add footer with version and build time
+    const buildTimestamp = new Date().toISOString();
+    const footerHtml = `\n<footer><p>Version: ${version} | Build: ${buildTimestamp}</p></footer>`;
 
-    // Upload the HTML to S3 as index.html
+    if (htmlContent.includes('</body>')) {
+        htmlContent = htmlContent.replace('</body>', `${footerHtml}\n</body>`);
+    } else {
+        htmlContent += footerHtml;
+        await logProcessing(jobId, 'No </body> tag found. Appended footer to the end of HTML.', 'WARNING');
+    }
+    await logProcessing(jobId, 'HTML content updated with S3 paths and footer.');
+
+    // Upload the modified HTML to S3
     const finalHtmlBuffer = Buffer.from(htmlContent, 'utf8');
-    const htmlS3Key = `${jobId}/index.html`; // Or a job-specific path like `${jobId}/index.html`
+    const htmlS3Key = `${jobId}/${path.basename(htmlFileEntry.entryName)}`; // HTML file at the root of the job folder
     const finalHtmlS3Url = await uploadToS3(finalHtmlBuffer, htmlS3Key, 'text/html');
     await logProcessing(jobId, `Uploaded modified HTML to ${finalHtmlS3Url}`);
 
     return {
-        htmlContent: htmlContent, // Return the modified HTML content
-        mappingJson: fileMapForJson as unknown as Prisma.JsonValue, // Cast to Prisma.JsonValue
+        htmlContent: htmlContent,
+        mappingJson: fileMapForJson as unknown as Prisma.JsonValue,
         processedFileCount: processedFileCount,
+        finalHtmlS3Url: finalHtmlS3Url
     };
 };
